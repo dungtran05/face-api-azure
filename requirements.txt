@@ -1,7 +1,8 @@
-flask
+Flask
 flask-cors
 ultralytics
 deepface
-pillow
 opencv-python-headless
+Pillow
 numpy
+gunicorn
