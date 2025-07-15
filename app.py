@@ -3,31 +3,50 @@ from flask_cors import CORS
 from ultralytics import YOLO
 from deepface import DeepFace
 from PIL import Image
+from io import BytesIO
 import os
 import uuid
 import cv2
 import numpy as np
-from collections import Counter
+import pyodbc
 
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 
 app = Flask(__name__)
 CORS(app)
 
+# Kết nối SQL Server
+conn = pyodbc.connect(
+    "DRIVER={ODBC Driver 17 for SQL Server};"
+    "SERVER=tcp:asdjnu12uh12husa.database.windows.net;"
+    "DATABASE=ai_2025;"
+    "UID=sqladmin;"
+    "PWD=YourPassword@123"
+)
+cursor = conn.cursor()
+
+# Load mô hình YOLO
 model = YOLO("best.pt")
-FACE_DB = "face_db"
-os.makedirs(FACE_DB, exist_ok=True)
 
 @app.route("/")
 def index():
     return "Face Recognition API is running"
 
-def save_face(img, name):
-    unique_id = str(uuid.uuid4())[:8]  # tạo ID ngắn
-    filename = f"{name}_{unique_id}.jpg"
-    path = os.path.join(FACE_DB, filename)
-    img.save(path)
-    return path
+def save_face_to_db(img, name):
+    img_bytes = BytesIO()
+    img.save(img_bytes, format="JPEG")
+    img_data = img_bytes.getvalue()
+    cursor.execute("INSERT INTO Faces (Name, Image) VALUES (?, ?)", name, img_data)
+    conn.commit()
+
+def get_all_faces_from_db():
+    cursor.execute("SELECT Name, Image FROM Faces")
+    rows = cursor.fetchall()
+    faces = []
+    for name, image_data in rows:
+        image = Image.open(BytesIO(image_data)).convert("RGB")
+        faces.append((name, np.array(image)))
+    return faces
 
 def detect_face(image):
     results = model.predict(image, conf=0.3, save=False)
@@ -48,9 +67,42 @@ def register():
     image = Image.open(file.stream).convert("RGB")
     face = detect_face(image)
     if face:
-        save_face(face, name)
+        save_face_to_db(face, name)
         return jsonify({"message": "Face registered"}), 200
     return jsonify({"error": "No face detected"}), 400
+
+@app.route("/verify_frame", methods=["POST"])
+def verify_frame():
+    file = request.files.get("image")
+    if not file:
+        return jsonify({"error": "No image provided"}), 400
+
+    try:
+        image = Image.open(file.stream).convert("RGB")
+    except:
+        return jsonify({"error": "Invalid image"}), 400
+
+    face = detect_face(image)
+    detected_names = []
+
+    if face:
+        face_np = np.array(face)
+        faces_in_db = get_all_faces_from_db()
+        for name, db_img in faces_in_db:
+            try:
+                result = DeepFace.verify(face_np, db_img, enforce_detection=False)
+                if result["verified"]:
+                    detected_names.append(name)
+                    break
+            except:
+                continue
+
+    predictions = [{
+        "class_name": name,
+        "confidence": 1.0
+    } for name in detected_names]
+
+    return jsonify({"predictions": predictions}), 200
 
 @app.route("/verify", methods=["POST"])
 def verify_video():
@@ -66,10 +118,10 @@ def verify_video():
         return jsonify({"error": "Cannot read video"}), 400
 
     fps = cap.get(cv2.CAP_PROP_FPS)
-    frame_interval = int(fps * 0.5)  # Lấy 1 frame mỗi 0.5 giây
-
+    frame_interval = int(fps * 0.5)
     frame_count = 0
     detected_names = set()
+    faces_in_db = get_all_faces_from_db()
 
     while True:
         ret, frame = cap.read()
@@ -86,12 +138,10 @@ def verify_video():
 
         if face:
             face_np = np.array(face)
-            for filename in os.listdir(FACE_DB):
-                db_path = os.path.join(FACE_DB, filename)
+            for name, db_img in faces_in_db:
                 try:
-                    result = DeepFace.verify(face_np, db_path, enforce_detection=False)
+                    result = DeepFace.verify(face_np, db_img, enforce_detection=False)
                     if result["verified"]:
-                        name = os.path.splitext(filename)[0].split("_")[0]
                         detected_names.add(name)
                         break
                 except:
@@ -110,53 +160,17 @@ def verify_video():
 
     return jsonify({"predictions": predictions}), 200
 
+@app.route("/faces", methods=["GET"])
+def list_faces():
+    cursor.execute("SELECT Name, COUNT(*) FROM Faces GROUP BY Name")
+    rows = cursor.fetchall()
+    face_list = [{"name": name, "count": count} for name, count in rows]
+    return jsonify({"faces": face_list})
+
 @app.route("/classes", methods=["GET"])
 def get_classes():
     class_list = [{"id": k, "name": v} for k, v in model.names.items()]
     return jsonify({"classes": class_list})
-
-@app.route("/faces", methods=["GET"])
-def list_faces():
-    counter = Counter()
-    for filename in os.listdir(FACE_DB):
-        if filename.endswith(".jpg"):
-            name = os.path.splitext(filename)[0].split("_")[0]
-            counter[name] += 1
-    face_list = [{"name": name, "count": count} for name, count in counter.items()]
-    return jsonify({"faces": face_list})
-@app.route("/verify_frame", methods=["POST"])
-def verify_frame():
-    file = request.files.get("image")
-    if not file:
-        return jsonify({"error": "No image provided"}), 400
-
-    try:
-        image = Image.open(file.stream).convert("RGB")
-    except:
-        return jsonify({"error": "Invalid image"}), 400
-
-    face = detect_face(image)
-    detected_names = []
-
-    if face:
-        face_np = np.array(face)
-        for filename in os.listdir(FACE_DB):
-            db_path = os.path.join(FACE_DB, filename)
-            try:
-                result = DeepFace.verify(face_np, db_path, enforce_detection=False)
-                if result["verified"]:
-                    name = os.path.splitext(filename)[0].split("_")[0]
-                    detected_names.append(name)
-                    break  # chỉ lấy người đầu tiên trùng
-            except:
-                continue
-
-    predictions = [{
-        "class_name": name,
-        "confidence": 1.0
-    } for name in detected_names]
-
-    return jsonify({"predictions": predictions}), 200
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
