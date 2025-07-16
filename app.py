@@ -20,7 +20,9 @@ conn = pyodbc.connect(
     "PWD=YourPassword@123"
 )
 cursor = conn.cursor()
-
+@app.route('/', methods=['GET'])
+def index():
+    return ('Face recognition API is running')
 # API: Đăng ký khuôn mặt
 @app.route('/register', methods=['POST'])
 def register_face():
